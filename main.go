@@ -1145,7 +1145,7 @@ func main() {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	const file = "o_r_orbilfolds.txt"
+	const file = "o_r_orbifolds.txt"
 	data, err := ioutil.ReadFile(path.Join(wd, file))
 	if err != nil {
 		fmt.Println(err)
