@@ -149,6 +149,21 @@ func (h hole) normalize() {
 	copy(h, n)
 }
 
+// String converts this hole to an immutable representation, which can be used in map keys.
+// The result won't be a human-readable string.
+func (h hole) String() string {
+	bs := make([]byte, len(h))
+	for i, b := range h {
+		if b.l {
+			bs[i] |= 0x1
+		}
+		if b.r {
+			bs[i] |= 0x2
+		}
+	}
+	return string(bs)
+}
+
 // holes is a slice of hole-s.
 type holes []hole
 
@@ -217,24 +232,47 @@ func (hs holes) selAll() (res []holes) {
 	return res
 }
 
-// split is an utility data structure that denotes which of two disjoint subsets
-// i-th element of some set belongs to.
-type split struct{ i, part int }
-
-// powerSet returns all ways of splitting a given n-element set into two disjoint subsets.
-func powerSet(n int) (res [][]split) {
-	res = make([][]split, 1<<uint8(n))
-	for i := 0; i < (1 << uint8(n)); i++ {
-		splits := make([]split, n)
-		for j := 0; j < n; j++ {
-			if (1<<uint8(j))&i != 0 {
-				splits[j] = split{j, 0}
-			} else {
-				splits[j] = split{j, 1}
-			}
+// pwSet splits the given set into two subsets in all possible 2^n ways.
+// It is assumed that although all elements are distinct, the only thing that
+// really matters for the caller is their string representations, so some
+// ways to split may yield practically the same result. To optimize the
+// return format in this case, each "practically distinct" way of splitting is
+// mapped to the number of ways it occurred.
+// Example: {x[String() == "a"], y[String() == "a"], z[String() == "b"]} will
+// yield six ways of splitting, with multiplicities:
+// ({x, y}, {z}, 1), ({x}, {y, z}, 2), ({}, {x, y, z}, 1).
+// ({x, y, z}, {}, 1), ({x, z}, {y}, 2), ({z}, {x, y}, 1).
+func pwSet(xs []fmt.Stringer) map[*[2][]fmt.Stringer]int64 {
+	var m [][]fmt.Stringer
+	idx := map[string]int{}
+	for _, x := range xs {
+		s := x.String()
+		id := idx[s]
+		if _, ok := idx[s]; !ok {
+			id = len(idx)
+			idx[s] = id
+			m = append(m, nil)
 		}
-		res[i] = splits
+		m[id] = append(m[id], x)
 	}
+	res := map[*[2][]fmt.Stringer]int64{}
+	var rec func(int, int64, [2][]fmt.Stringer)
+	rec = func(i int, cnt int64, cur [2][]fmt.Stringer) {
+		if i == len(m) {
+			cur[0] = append(([]fmt.Stringer)(nil), cur[0]...)
+			cur[1] = append(([]fmt.Stringer)(nil), cur[1]...)
+			res[&cur] = cnt
+			return
+		}
+		for k := 0; k <= len(m[i]); k++ {
+			n := len(m[i])
+			rec(i+1, cnt*fact(n)/fact(k)/fact(n-k), [2][]fmt.Stringer{
+				append(cur[0], m[i][:k]...),
+				append(cur[1], m[i][k:]...),
+			})
+		}
+	}
+	rec(0, 1, [2][]fmt.Stringer{})
 	return res
 }
 
@@ -299,30 +337,58 @@ func (s *signature) isClosedSurface() bool {
 	return len(s.hole0) == 0 && len(s.holes) == 0
 }
 
+// intStringer makes an integer satisfy fmt.Stringer interface.
+type intStringer int
+
+// String makes intStringer satisfy fmt.Stringer.
+func (i intStringer) String() string {
+	return strconv.Itoa(int(i))
+}
+
 // split split this signature into two, in all possible ways:
 // chosen vertices and holes are split among two maps in 2^n ways,
 // genus and darts are split as "unlabelled" objects, in n+1 ways.
-func (s *signature) split() (res [][2]signature) {
-	degSet := powerSet(len(s.degs))
-	holeSet := powerSet(len(s.holes))
-	for _, degc := range degSet {
-		var degss [2]degs
-		for _, d := range degc {
-			degss[d.part] = append(degss[d.part], s.degs[d.i])
+func (s *signature) split() map[*[2]signature]int64 {
+	degSlice := make([]fmt.Stringer, len(s.degs))
+	for i, d := range s.degs {
+		degSlice[i] = intStringer(d)
+	}
+	degSet := make(map[*[2]degs]int64)
+	for degss, cnt := range pwSet(degSlice) {
+		var d [2]degs
+		for _, deg := range (*degss)[0] {
+			d[0] = append(d[0], int(deg.(intStringer)))
 		}
-		lb2 := degss[0].sum()
-		hb2 := s.darts - degss[1].sum()
+		for _, deg := range (*degss)[1] {
+			d[1] = append(d[1], int(deg.(intStringer)))
+		}
+		degSet[&d] = cnt
+	}
+
+	holeSlice := make([]fmt.Stringer, len(s.holes))
+	for i, d := range s.holes {
+		holeSlice[i] = d
+	}
+	holeSet := make(map[*[2]holes]int64)
+	for holess, cnt := range pwSet(holeSlice) {
+		var h [2]holes
+		for _, hl := range (*holess)[0] {
+			h[0] = append(h[0], hl.(hole))
+		}
+		for _, hl := range (*holess)[1] {
+			h[1] = append(h[1], hl.(hole))
+		}
+		holeSet[&h] = cnt
+	}
+
+	res := map[*[2]signature]int64{}
+	for degss, degCnt := range degSet {
+		lb2 := (*degss)[0].sum()
+		hb2 := s.darts - (*degss)[1].sum()
 		if lb2 > hb2 {
 			continue
 		}
-		for _, holec := range holeSet {
-			holess := [...]holes{
-				make(holes, 0, len(holec)),
-				make(holes, 0, len(holec)),
-			}
-			for _, h := range holec {
-				holess[h.part] = append(holess[h.part], s.holes[h.i])
-			}
+		for holess, holeCnt := range holeSet {
 			for g := 0; g <= s.genus; g++ {
 				lb, hb := 0, s.darts
 				/* optimization */
@@ -340,10 +406,10 @@ func (s *signature) split() (res [][2]signature) {
 				/* end optimization */
 				for d := lb; d <= hb; d++ {
 					for _, ivf := range s.splitInnerVF() {
-						res = append(res, [2]signature{{
+						res[&[2]signature{{
 							genus:              g,
-							holes:              holess[0],
-							degs:               degss[0],
+							holes:              (*holess)[0],
+							degs:               (*degss)[0],
 							darts:              d,
 							hole0:              s.hole0,
 							deg0:               s.deg0,
@@ -351,12 +417,12 @@ func (s *signature) split() (res [][2]signature) {
 							innervf:            ivf[0],
 						}, {
 							genus:              s.genus - g,
-							holes:              holess[1],
-							degs:               degss[1],
+							holes:              (*holess)[1],
+							degs:               (*degss)[1],
 							darts:              s.darts - d,
 							maybeNonorientable: s.maybeNonorientable,
 							innervf:            ivf[1],
-						}})
+						}}] = degCnt * holeCnt
 					}
 				}
 			}
@@ -460,12 +526,9 @@ func (s signature) reduce_JoinInternalChosen() (res []signature) {
 	for i := 0; i < len(s.degs); i++ {
 		s := s
 		s.deg0 += s.degs[i] - 2
-		s.degs = append(append(degs{}, s.degs[:i]...), s.degs[i+1:]...)
+		s.degs = append(append((degs)(nil), s.degs[:i]...), s.degs[i+1:]...)
 		s.darts -= 2
 		res = append(res, s)
-	}
-	if s.maybeNonorientable {
-		return append(res, res...)
 	}
 	return res
 }
@@ -642,17 +705,20 @@ func (s signature) reduce_Internal_CutCrosscap() []signature {
 // reduce_Internal_Split returns all signatures that can arise
 // after contracting a root edge that is a loop lying in surface interior, such that
 // this contraction splits a map into two maps.
-func (s signature) reduce_Internal_Split() (res [][2]signature) {
+func (s signature) reduce_Internal_Split() map[*[2]signature]int64 {
 	if s.genus < 0 || len(s.hole0) != 0 {
 		return nil
 	}
 	s.darts -= 2
 	s.incInnerVF(+1)
-	for _, sgns := range s.split() {
+	res := map[*[2]signature]int64{}
+	for sgns, cnt := range s.split() {
 		for deg := 0; deg <= s.deg0-2; deg++ {
-			sgns[0].deg0 = deg
-			sgns[1].deg0 = s.deg0 - 2 - deg
-			res = append(res, sgns)
+			var newSgns [2]signature
+			newSgns = *sgns
+			newSgns[0].deg0 = deg
+			newSgns[1].deg0 = s.deg0 - 2 - deg
+			res[&newSgns] = cnt
 		}
 	}
 	return res
@@ -673,13 +739,17 @@ func (s signature) countInterior() (cnt int64) {
 		cnt += t.count()
 	}
 	for _, t := range s.reduce_JoinInternalChosen() {
-		cnt += int64(t.deg0-s.deg0+2) * t.count()
+		k := int64(1)
+		if s.maybeNonorientable {
+			k = 2
+		}
+		cnt += k * int64(t.deg0-s.deg0+2) * t.count()
 	}
 	for _, t := range s.reduce_Internal_DecreaseGenus() {
 		cnt += t.count()
 	}
-	for _, t := range s.reduce_Internal_Split() {
-		cnt += t[0].count() * t[1].count()
+	for sgns, c := range s.reduce_Internal_Split() {
+		cnt += c * (*sgns)[0].count() * (*sgns)[1].count()
 	}
 	for _, t := range s.reduce_Internal_CutCrosscap() {
 		cnt += int64(s.deg0-1) * t.count()
@@ -828,17 +898,20 @@ func (s signature) reduce_External_HoleCutCrosscap() (res []signature) {
 // reduce_External_LoopSplit returns all signatures that can arise
 // after contracting a root edge that is a loop incident to a vertex on the boundary,
 // such that this contraction splits the map into two.
-func (s signature) reduce_External_LoopSplit() (res [][2]signature) {
+func (s signature) reduce_External_LoopSplit() map[*[2]signature]int64 {
 	if len(s.hole0) == 0 || s.hole0[0].l {
-		return
+		return nil
 	}
 	h := s.hole0
 	s.hole0 = nil
 	s.incInnerVF(+1)
-	for _, maps := range s.reduce_Internal_Split() {
-		maps[0].hole0 = h
-		maps[0].incInnerVF(-1)
-		res = append(res, maps)
+	res := map[*[2]signature]int64{}
+	for sgns, cnt := range s.reduce_Internal_Split() {
+		var newSgns [2]signature
+		newSgns = *sgns
+		newSgns[0].hole0 = h
+		newSgns[0].incInnerVF(-1)
+		res[&newSgns] = cnt
 	}
 	return res
 }
@@ -846,20 +919,23 @@ func (s signature) reduce_External_LoopSplit() (res [][2]signature) {
 // reduce_External_HoleSplit returns all signatures that can arise
 // after contracting a root edge that joins two vertices on the same boundary component
 // such that this contraction splits the map into two.
-func (s signature) reduce_External_HoleSplit() (res [][2]signature) {
+func (s signature) reduce_External_HoleSplit() map[*[2]signature]int64 {
 	if len(s.hole0) == 0 || s.hole0[0].l || s.deg0 <= 0 {
-		return
+		return nil
 	}
 	s.darts -= 2
-	for _, hs := range s.hole0.split() {
-		for _, maps := range s.split() {
-			maps[0].hole0 = hs[0]
-			maps[1].hole0 = hs[1]
-			for d0 := s.deg0 - 1; d0 <= maps[0].darts; d0++ {
-				for d1 := 0; d1 <= maps[1].darts; d1++ {
-					maps[0].deg0 = d0
-					maps[1].deg0 = d1
-					res = append(res, maps)
+	res := map[*[2]signature]int64{}
+	for sgns, cnt := range s.split() {
+		for _, hs := range s.hole0.split() {
+			for d0 := s.deg0 - 1; d0 <= (*sgns)[0].darts; d0++ {
+				for d1 := 0; d1 <= (*sgns)[1].darts; d1++ {
+					var newSgns [2]signature
+					newSgns = *sgns
+					newSgns[0].hole0 = hs[0]
+					newSgns[1].hole0 = hs[1]
+					newSgns[0].deg0 = d0
+					newSgns[1].deg0 = d1
+					res[&newSgns] = cnt
 				}
 			}
 		}
@@ -891,11 +967,11 @@ func (s signature) countExterior() (cnt int64) {
 	for _, s := range s.reduce_External_LoopCutCrosscap() {
 		cnt += int64(s.deg0+1) * s.count()
 	}
-	for _, maps := range s.reduce_External_LoopSplit() {
-		cnt += maps[0].count() * maps[1].count()
+	for sgns, c := range s.reduce_External_LoopSplit() {
+		cnt += c * (*sgns)[0].count() * (*sgns)[1].count()
 	}
-	for _, maps := range s.reduce_External_HoleSplit() {
-		cnt += maps[0].count() * maps[1].count()
+	for sgns, c := range s.reduce_External_HoleSplit() {
+		cnt += c * (*sgns)[0].count() * (*sgns)[1].count()
 	}
 	for _, t := range s.reduce_External_HoleCutCrosscap() {
 		cnt += t.count()
@@ -905,7 +981,11 @@ func (s signature) countExterior() (cnt int64) {
 			cnt += t.count()
 		}
 		for _, t := range s.reduce_JoinInternalChosen() {
-			cnt += int64(t.deg0-s.deg0+2) * t.count()
+			k := int64(1)
+			if s.maybeNonorientable {
+				k = 2
+			}
+			cnt += k * int64(t.deg0-s.deg0+2) * t.count()
 		}
 		{
 			// dangling edge to a hole
@@ -1181,7 +1261,7 @@ func main() {
 			panic(fmt.Sprintf("%q: %s", splits[1], err))
 		}
 		for e := 0; e <= *edges; e++ {
-			//t := time.Now()
+			t := time.Now()
 			for len(cnt[e]) <= *genus {
 				cnt[e] = append(cnt[e], 0)
 			}
@@ -1189,7 +1269,7 @@ func main() {
 				continue
 			}
 			val := Epi * countOnOrbifold(2*e/L, signStr == "[+]", Chi, H, m...)
-			//fmt.Println(e, 2*e/L, signStr == "[+]", Chi, H, m, "====", val, int64(time.Now().Sub(t))/1e6)
+			fmt.Println(e, 2*e/L, signStr == "[+]", Chi, H, m, "====", val, int64(time.Now().Sub(t))/1e6)
 			cnt[e][G] += val
 		}
 	}
